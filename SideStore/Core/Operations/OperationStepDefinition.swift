@@ -260,6 +260,15 @@ struct PipelineStepDefinition {
         case .resign:
             return resign
         case .refresh:
+            // FIX: 本地 App 包缺失时，refresh 流水线无法设置 context.targetAppBundle。
+            //      .downloadApp 是唯一会兜底设置它的步骤，而 refresh 流水线里没有这一步，
+            //      于是 VerifyCertificateOperation 会抛
+            //      "targetAppBundle is missing in context"。
+            //      这里在包不存在时补上下载步骤（PipelineRunner 已把 downloadingApp 换成 storeApp）。
+            if let installedApp = operation.app as? InstalledApp,
+               !FileManager.default.fileExists(atPath: installedApp.fileURL.path) {
+                return [PipelineExecutionStep(.downloadApp, 20)] + refresh
+            }
             return refresh
         case .activate:
             return UserDefaults.standard.isLegacyDeactivationSupported ? activateLegacy : activate
