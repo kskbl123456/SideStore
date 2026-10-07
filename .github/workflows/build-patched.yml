@@ -1,0 +1,77 @@
+name: Build SideStore IPA (patched)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 官方 nightly.yml 用的就是这个 runner + Xcode 版本，最稳
+    runs-on: macos-26
+    steps:
+      - name: 拉取代码（含子模块）
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: 选择 Xcode 版本
+        uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: "26.4"
+
+      - name: 安装 ldid
+        run: brew install ldid
+
+      # 官方 CI 也做这一步：预下载 SPM 二进制依赖，避免 GitHub 网络抖动导致构建失败
+      - name: 预下载 SPM 二进制依赖
+        run: |
+          ARTIFACTS_DIR="$HOME/Library/Caches/org.swift.swiftpm/artifacts"
+          mkdir -p "$ARTIFACTS_DIR"
+
+          OPENSSL_FILE="$ARTIFACTS_DIR/https___github_com_krzyzanowskim_OpenSSL_releases_download_3_6_2000_OpenSSL_xcframework_zip"
+          [ -f "$OPENSSL_FILE" ] || curl -fsSL \
+            "https://github.com/krzyzanowskim/OpenSSL/releases/download/3.6.2000/OpenSSL.xcframework.zip" \
+            -o "$OPENSSL_FILE"
+
+          UNICORN_FILE="$ARTIFACTS_DIR/https___github_com_mahee96_unicorn_releases_download_2_1_4_multiarch_Unicorn_xcframework_zip"
+          [ -f "$UNICORN_FILE" ] || curl -fsSL \
+            "https://github.com/mahee96/unicorn/releases/download/2.1.4-multiarch/Unicorn.xcframework.zip" \
+            -o "$UNICORN_FILE"
+
+      # 确认补丁确实生效了，避免改错分支还白跑 20 分钟
+      - name: 校验补丁已应用
+        run: |
+          if grep -q "本地 App 包缺失时" SideStore/Core/Operations/OperationStepDefinition.swift; then
+            echo "✅ 补丁已应用"
+          else
+            echo "❌ 没找到补丁！检查是不是改在 LiveContainerSupport 分支上"
+            exit 1
+          fi
+
+      - name: 编译（archive，官方 CI 本身就不签名）
+        run: |
+          mkdir -p build/logs
+          make -B build > build/logs/build.log 2>&1 \
+            || { echo "===== 编译失败，最后 200 行日志 ====="; tail -200 build/logs/build.log; exit 1; }
+          echo "===== 编译成功 ====="
+          tail -15 build/logs/build.log
+          test -d SideStore.xcarchive/Products/Applications/SideStore.app
+
+      - name: 假签名（ldid，保留 entitlements）
+        run: make fakesign
+
+      - name: 打包成 IPA
+        run: make ipa
+
+      - name: 校验产物
+        run: |
+          ls -la SideStore.ipa
+          echo "----- IPA 内容 -----"
+          unzip -l SideStore.ipa | head -15
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SideStore-patched
+          path: SideStore.ipa
+          if-no-files-found: error
